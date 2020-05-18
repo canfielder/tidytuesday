@@ -1,0 +1,409 @@
+---
+title: '#TidyTuesday - Volcano Eruptions'
+author: "Evan Canfield"
+date: "5/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Link**: [https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-05-12](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-05-12)
+
+# Load
+## Libraries
+```{r load_library}
+if (!require(pacman)) {install.packages('pacman')} 
+p_load(
+  animation,
+  data.table,
+  gganimate,
+  ggthemes,
+  Hmisc,
+  lubridate,
+  maps, 
+  mapdata,
+  maptools,
+  plotly,
+  rgdal,
+  rgeos,
+  rnaturalearth,
+  sf,
+  skimr,
+  tidyverse,
+  viridis
+)
+```
+
+## Data
+```{r load_data}
+volcano <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-12/volcano.csv')
+eruptions <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-12/eruptions.csv')
+events <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-12/events.csv')
+tree_rings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-12/tree_rings.csv')
+sulfur <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-12/sulfur.csv')
+```
+
+# EDA
+
+```{r}
+volcano %>% head()
+
+volcano %>% skim()
+```
+
+```{r}
+eruptions %>% head()
+```
+
+```{r}
+events %>% head()
+```
+
+```{r}
+tree_rings %>% head()
+```
+
+```{r}
+sulfur %>% head()
+```
+
+```{r}
+events %>% 
+  group_by(event_type) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  arrange(desc(n))
+```
+
+
+# Exploratory Visuals
+## Tree Rings
+```{r}
+ggplot(data = tree_rings, 
+       mapping = aes(x= n_tree, y = europe_temp_index, color = year)) +
+  geom_point() +
+  theme_minimal()
+```
+
+* Determine Century
+* Drop year 2000. Only year in it's century
+* Map color to century. See if there are any patterns
+```{r}
+tree_rings %>% 
+  filter(year != 2000) %>% 
+  mutate(century = trunc(year/100)) %>% 
+  ggplot(mapping = aes(x= n_tree, y = europe_temp_index, color = century)) +
+  geom_point() +
+  scale_color_viridis() +
+  theme_minimal()
+```
+
+* Take averages per century
+* Inspect for outliers.
+
+```{r}
+p <- tree_rings %>% 
+  filter(year != 2000) %>% 
+  mutate(century = trunc(year/100)) %>% 
+  group_by(century) %>% 
+  summarise(n_tree_avg = mean(n_tree),
+            europe_temp_index_avg = mean(europe_temp_index)) %>% 
+  ggplot(mapping = aes(x= n_tree_avg, y = europe_temp_index_avg, color = century)) +
+  geom_point() +
+  scale_color_viridis() +
+  theme_minimal()
+
+ggplotly(p)
+```
+
+
+# Visual
+The basic visual I want to make is a map, perhaps an animation. The map should center the Ring of Fire. 
+
+First we need to create our core dataset. 
+
+```{r}
+volcano %>% glimpse()
+
+eruptions %>% glimpse()
+
+df_input <- eruptions %>% 
+  mutate(eruption_date = ymd(paste0(start_year,"-",start_month,"-",start_day))) %>% 
+  select(volcano_number:eruption_category, vei, eruption_date, start_year, evidence_method_dating, latitude, longitude) %>% 
+  mutate(year_ago = 2020 +1-start_year)
+
+df_input
+```
+
+Look at how vocano eruptions are documented over the years.
+```{r}
+df_input %>% 
+  ggplot(aes(x = year_ago, fill = eruption_category)) +
+  geom_histogram() +
+  scale_x_log10() +
+  theme_minimal()
+```
+
+Import a country based world map from **rnaturalearth**.
+```{r}
+NE_countries <-  ne_countries(returnclass='sp')
+
+class(NE_countries)
+```
+
+
+```{r}
+# shift central/prime meridian towards west - positive values only
+shift <- 180+30
+
+# create "split line" to split country polygons
+WGS84 <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+split.line = SpatialLines(list(Lines(list(Line(cbind(180-shift,c(-90,90)))), ID="line")), 
+                          proj4string=WGS84)
+
+# NOTE - in case of TopologyException' errors when intersecting line with country polygons,
+# apply the gBuffer solution suggested at:
+# http://gis.stackexchange.com/questions/163445/r-solution-for-topologyexception-input-geom-1-is-invalid-self-intersection-er
+# NE_countries <- gBuffer(NE_countries, byid=TRUE, width=0)
+
+# intersecting line with country polygons
+line.gInt <- gIntersection(split.line, NE_countries)
+
+# create a very thin polygon (buffer) out of the intersecting "split line"
+bf <- gBuffer(line.gInt, byid=TRUE, width=0.000001)  
+
+# split country polygons using intersecting thin polygon (buffer)
+NE_countries.split <- gDifference(NE_countries, bf, byid=TRUE)
+
+# plot(NE_countries.split) # check map
+class(NE_countries.split) # is a SpatialPolygons object
+
+```
+
+
+```{r}
+# create a bounding box - world extent
+b.box <- as(raster::extent(-180, 180, -90, 90), "SpatialPolygons")
+
+# assign CRS to box
+proj4string(b.box) <- WGS84
+
+# create graticules/grid lines from box
+grid <- gridlines(b.box, 
+                  easts  = seq(from=-180, to=180, by=20),
+                  norths = seq(from=-90, to=90, by=10))
+
+# create labels for graticules
+grid.lbl <- labels(grid, side = 1:4)
+
+# transform labels from SpatialPointsDataFrame to a data table that ggplot can use
+grid.lbl.DT <- data.table(grid.lbl@coords, grid.lbl@data)
+
+# prepare labels with regular expression:
+# - delete unwanted labels
+grid.lbl.DT[, labels := gsub(pattern="180\\*degree|90\\*degree\\*N|90\\*degree\\*S", replacement="", x=labels)]
+
+# - replace pattern "*degree" with "°" (* needs to be escaped with \\)
+grid.lbl.DT[, lbl := gsub(pattern="\\*degree", replacement="°", x=labels)]
+
+# - delete any remaining "*"
+grid.lbl.DT[, lbl := gsub(pattern="*\\*", replacement="", x=lbl)]
+
+# adjust coordinates of labels so that they fit inside the globe
+grid.lbl.DT[, long := ifelse(coords.x1 %in% c(-180,180), coords.x1*175/180, coords.x1)]
+grid.lbl.DT[, lat  := ifelse(coords.x2 %in% c(-90,90), coords.x2*82/90, coords.x2)]
+```
+
+
+```{r}
+# give the PORJ.4 string for Eckert IV projection
+PROJ <- "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs" 
+
+
+# transform graticules from SpatialLines to a data table that ggplot can use
+grid.DT <- data.table(map_data(SpatialLinesDataFrame(sl=grid, 
+                                                     data=data.frame(1:length(grid)), 
+                                                     match.ID = FALSE)))
+# project coordinates
+# assign matrix of projected coordinates as two columns in data table
+grid.DT[, c("X","Y") := data.table(project(cbind(long, lat), proj=PROJ))]
+
+# project coordinates of labels
+grid.lbl.DT[, c("X","Y") := data.table(project(cbind(long, lat), proj=PROJ))]
+
+# transform split country polygons in a data table that ggplot can use
+Country.DT <- data.table(map_data(as(NE_countries.split, "SpatialPolygonsDataFrame")))
+
+# Shift coordinates
+Country.DT[, long.new := long + shift]
+Country.DT[, long.new := ifelse(long.new > 180, long.new-360, long.new)]
+
+# project coordinates 
+Country.DT[, c("X","Y") := data.table(project(cbind(long.new, lat), proj=PROJ))]
+```
+
+
+We need to perform the same shift and projection of coordinates to the volcano data.
+```{r}
+# Shift coordinates
+df_input <- df_input %>% 
+  mutate(long.new = longitude + shift,
+         long.new = if_else(long.new > 180, long.new -360, long.new))
+
+# project coordinates 
+eruption_proj <- as.data.frame(project(cbind(df_input$long.new, df_input$latitude), proj=PROJ))
+
+df_input <- df_input %>% mutate(long_proj  = eruption_proj$V1,
+                            lat_proj = eruption_proj$V2)
+
+df_input
+```
+
+## Blank Map - White / Gray
+```{r}
+p_map_white_grey <- ggplot() + 
+  
+  # add projected countries
+  geom_polygon(data = Country.DT, 
+               aes(x = X, 
+                   y = Y, 
+                   group = group), 
+               colour = "gray90", 
+               fill = "gray80", 
+               size = 0.75) +
+  
+  # add graticules
+  # geom_path(data = grid.DT, 
+  #           aes(x = X, y = Y, group = group), 
+  #           linetype = "dotted", colour = "grey50", size = .25) +
+  
+  # add a bounding box (select graticules at edges)
+  geom_path(data = grid.DT[(long %in% c(-180,180) & region == "NS")
+                           |(long %in% c(-180,180) & lat %in% c(-90,90) & region == "EW")], 
+            aes(x = X, y = Y, group = group), 
+            linetype = "solid", colour = "black", size = .3) +
+  
+  # # add graticule labels
+  # geom_text(data = grid.lbl.DT, # latitude
+  #           aes(x = X, y = Y, label = lbl), 
+  #           colour = "grey50", size = 2) +
+  
+  # ensures that one unit on the x-axis is the same length as one unit on the y-axis
+  coord_equal() + # same as coord_fixed(ratio = 1)
+  
+  # set empty theme
+  theme_void()
+
+p_map_white_grey
+```
+
+
+## Blank Map - Black / Gray
+```{r}
+p_map_black_grey <- ggplot() + 
+  
+  # add a bounding box (select graticules at edges)
+  geom_polygon(data = grid.DT[(long %in% c(-180,180) & region == "NS")
+                           |(long %in% c(-180,180) & lat %in% c(-90,90) & region == "EW")], 
+            aes(x = X, y = Y, group = group), 
+            linetype = "solid", colour = "black", size = .3) +
+  
+  # add projected countries
+  geom_polygon(data = Country.DT, 
+               aes(x = X, 
+                   y = Y, 
+                   group = group), 
+               colour = "gray90", 
+               fill = "gray90",
+               size = 0.25) +
+  
+  # add graticules
+  # geom_path(data = grid.DT, 
+  #           aes(x = X, y = Y, group = group), 
+  #           linetype = "dotted", colour = "grey50", size = .25) +
+  
+  
+  # # add graticule labels
+  # geom_text(data = grid.lbl.DT, # latitude
+  #           aes(x = X, y = Y, label = lbl), 
+  #           colour = "grey50", size = 2) +
+  
+  # ensures that one unit on the x-axis is the same length as one unit on the y-axis
+  coord_equal() + # same as coord_fixed(ratio = 1)
+  
+  # set empty theme
+  theme_void()
+
+p_map_black_grey
+```
+
+
+# Map with Geom Point Eruptions
+```{r}
+cutoff_year = 1800
+point_alpha = 0.25
+point_size = 4
+point_shape = 16
+point_color = '#FF0000'
+
+theme_erupt <- function(){
+  theme(
+    plot.title = element_text(size = 30),
+    plot.subtitle = element_text(size = 25),
+    plot.caption = element_text(size = 20),
+    plot.margin =  margin(0.5, 0.5, 0.5, 0.5, "cm")
+  )
+}
+
+
+p_static <- p_map_white_grey + 
+  geom_point(data = df_input %>% filter(start_year >= cutoff_year),
+               mapping = aes(x = long_proj, 
+                             y = lat_proj),
+             color = point_color, 
+             alpha = point_alpha,
+             size = point_size,
+             shape = point_shape) +
+  ggtitle(label = "Vocanic Eruptions Around the World",
+          subtitle = paste0("From ", cutoff_year," Through Today")) +
+  labs(caption = "#TidyTuesday || Created By: Evan Canfield") + 
+  theme_erupt()
+
+ggsave(filename = "output/featured_image.png", plot = p_static, width = 16, height = 9, units = "in")
+
+p_static
+```
+
+
+```{r}
+p_animate <- p_static +
+  transition_manual(eruption_date, cumulative = TRUE) +
+  ease_aes('bounce-in') +
+  enter_fade() +
+  exit_fade()
+
+# Animation Time (sec)
+animation_time = 60
+
+# Frames per Second
+fps = 10
+
+height_opt = 900
+width_opt = 1600
+dim_factor = 2
+
+eruption_gif <- animate(p_animate, 
+        nframes = animation_time * fps,
+        fps = fps,
+        height = height_opt/dim_factor,
+        width = width_opt/dim_factor)
+```
+
+```{r}
+eruption_gif
+anim_save(filename = "output/eruptions.gif", animation = eruption_gif )
+```
+
