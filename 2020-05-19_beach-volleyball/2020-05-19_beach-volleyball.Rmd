@@ -9,3 +9,120 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+**Link**: [https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-05-19/readme.md](https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-05-19/readme.md)
+
+# Load
+## Libraries
+```{r load_library}
+if (!require(pacman)) {install.packages('pacman')} 
+p_load(
+  ggridges,
+  lubridate,
+  skimr,
+  stringr,
+  tidyverse,
+  viridis
+)
+```
+
+## Data
+```{r load_data}
+vb_matches <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-05-19/vb_matches.csv', guess_max = 76000)
+```
+
+# EDA
+```{r}
+vb_matches %>% head(10)
+```
+
+```{r}
+vb_matches %>% skim()
+```
+# Transformation
+I need to calculate the average player height and standard deviation to create a baseline.
+
+```{r}
+hgt_avg <- vb_matches %>% 
+  select(w_p1_hgt, w_p2_hgt, l_p1_hgt, l_p2_hgt) %>% 
+  pivot_longer(cols = everything(),
+              names_to = "player", 
+              values_to = "height") %>%
+  drop_na() %>% 
+  summarise(hgt_avg = mean(height)) %>% 
+  as.numeric()
+
+hgt_avg
+
+hgt_sd <- vb_matches %>% 
+  select(w_p1_hgt, w_p2_hgt, l_p1_hgt, l_p2_hgt) %>% 
+  pivot_longer(cols = everything(),
+              names_to = "player", 
+              values_to = "height") %>%
+  drop_na() %>% 
+  summarise(hgt_sd = sd(height)) %>% 
+  as.numeric()
+
+hgt_sd
+```
+
+Now, I'll calculate the average height of each team in each match, and select important grouping variables. We will also calculate if the taller team won, and if the team was 1 standard deviation taller and won.
+```{r}
+df <- vb_matches %>% 
+  mutate(w_hgt_avg = (w_p1_hgt + w_p2_hgt)/2, 
+         l_hgt_avg = (l_p1_hgt + l_p2_hgt)/2,
+         tall_win = case_when(w_hgt_avg > l_hgt_avg ~ 1,
+                              w_hgt_avg < l_hgt_avg ~ -1,
+                              TRUE ~ 0),
+        tall_win_sd = case_when((w_hgt_avg - l_hgt_avg) > hgt_sd  ~ 1,
+                    (w_hgt_avg - l_hgt_avg) < -hgt_sd  ~ -1,
+                    TRUE ~ 0)) %>% 
+  select(circuit:gender, bracket, round, w_hgt_avg:tall_win_sd)
+
+df %>% skim()
+```
+
+The tournament round is a character. Let's convert to a numeric.
+
+```{r}
+df <- df %>% 
+  mutate(round = as.numeric(str_remove(round,"Round ")))
+```
+
+
+For simplicity, and becuase the amount of missing data isn't huge, we're going to just drop NAs.
+```{r}
+df <- df %>% drop_na()
+
+df %>% skim()
+```
+
+
+```{r}
+df %>% glimpse()
+
+df_input <- df %>% 
+  mutate(gender = if_else(gender =="M", "Mens", "Womens")) %>% 
+  filter(tall_win != 0) %>% 
+  group_by(gender, tournament) %>% 
+  count(tall_win) %>% 
+  mutate(freq = n / sum(n)) %>% 
+  filter(tall_win == 1)
+
+df_input %>% glimpse
+```
+
+```{r}
+p_ridges_hgt <- ggplot(data = df_input, 
+  aes(x = freq, y = gender, fill = ..x..)) +
+  geom_density_ridges_gradient() +
+  scale_fill_viridis(name = "Frequency", option = "D") +
+  xlab(label = "Winning Percentage ") +
+  ylab(label = "Gender") +
+  ggtitle(label = "Height Advantage in Beach Volleyball",
+          subtitle = "Distribution of Tournament Winning Percentage for Taller Teams") +
+  theme_ridges() + 
+  theme(legend.position = "none")
+
+p_ridges_hgt
+ggsave(filename = "imgs/ridges_plot.png", plot = p_ridges_hgt, width = 12, height = 9, units = "in")
+```

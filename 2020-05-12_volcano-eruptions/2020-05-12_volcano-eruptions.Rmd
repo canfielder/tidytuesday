@@ -46,7 +46,6 @@ sulfur <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tid
 ```
 
 # EDA
-
 ```{r}
 volcano %>% head()
 
