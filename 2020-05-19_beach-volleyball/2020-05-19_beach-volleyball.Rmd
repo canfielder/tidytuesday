@@ -124,5 +124,5 @@ p_ridges_hgt <- ggplot(data = df_input,
   theme(legend.position = "none")
 
 p_ridges_hgt
-ggsave(filename = "imgs/ridges_plot.png", plot = p_ridges_hgt, width = 12, height = 9, units = "in")
+ggsave(path = "output/", filename = "ridges_plot.png", plot = p_ridges_hgt, width = 12, height = 9, units = "in")
 ```
